@@ -7,47 +7,24 @@ org 0x7C00
 ; Bootloader runs in real mode before switching to protected mode.
 bits 16
 
-; define new line in BIOS environment
 %define ENDL 0x0D, 0x0A
 
 start:
 	jmp bootloader
 
-; Prints a string to the screen.
-; Params:
-;	- ds:si points to string
 print:
-	; Save registers we will modify
-
-	; Stack pointer (sp) is currently at 0x7C00
-	; After push si: value of si is stored at address 0x7BFE-0x7BFF, sp becomes 0x7BFE 
 	push si
-	; After push ax: value of ax is stored at address 0x7BFC-0x7BFD, sp becomes 0x7BFC
-	; Stack now contains: [0x7BFC] = ax, [0x7BFC] = si
 	push ax
-
 .loop:
-	; these instructions load a byte/word/double-word from [ds:si] into AL/AX/EAX
-	; then increment si by the number of bytes loaded
-	lodsb ; loads next character into AL and increment si
-	
-	or al, al ; verfy if next character is NULL (0x00)
-	jz .done ; jumps to destination if zero flag is set (character is NULL)
-
-	mov ah, 0x0E ; Function: teletype print
-	mov bh, 0x00 ; page number
-	int 0x10 ; Call SeaBIOS print interrupt
-	
-	jmp .loop ; loop back to load next character
-
+	lodsb
+	or al, al
+	jz .done
+	mov ah, 0x0E
+	int 0x10
+	jmp .loop
 .done:
-	; Restore registers to their original values
-
-	; pop ax: retrieves value from address 0x7BFC-0x7BFD into ax, sp becomes 0x7BFE
 	pop ax
-	; pop si: retrieves value from address 0x7BFE-0x7BFF into si, sp becomes 0x7C00
 	pop si
-	; Stack is now empty, back to original state
 	ret
 
 bootloader:
@@ -57,9 +34,11 @@ bootloader:
 	; We set both to 0 so we can access memory from address 0x00000 onwards
 	
 	mov ax, 0 ; can't write to ds/es directly
+
 	; ds (Data Segment) = 0
 	; Now data accesses use physical addresses directly
 	mov ds, ax
+
 	; es (Extra Segment) = 0
 	; Alternative segment register for data operations
 	mov es, ax
@@ -70,24 +49,81 @@ bootloader:
 	; ss (Stack Segment) = 0
 	; Stack base address = 0 * 0x10 = 0x00000
 	mov ss, ax
+
 	; sp (Stack Pointer) = 0x7C00
 	; Stack begins at 0x7C00 and grows downwards.
 	; This places the stack just below our bootloader code, keeping it safe.
 	; When PUSH happens, stack pointer decreases (grows down).
 	mov sp, 0x7C00
 
-	; print message
-	mov si, msg_hello
+	mov si, msg_reading_header
 	call print
 
-	; stops CPU from executing (it can be resumed by an interrupt)
+	; Read sector 1 (image_header) at 0x7E00
+	mov ax, 0
+	mov es, ax
+	mov bx, 0x7E00
+
+	mov ah, 0x02 ; function: read sectors
+	mov al, 1 ; read sector 1
+	mov ch, 0 ; cilindre 0
+	mov cl, 2 ; sector 1
+	mov dh, 0 ; head 0
+	mov dl, 0x80 ; main disk
+	int 0x13
+
+	jc disk_error ; jump if there is an error
+
+	mov si, msg_header_ok
+	call print
+
+	; Read header values
+	mov eax, [0x7E00] ; kernel_sector
+	mov ecx, [0x7E04] ; kernel_size
+
+	; Compute how many sectors to read
+	; sectors = (kernel_size + 511) / 512
+	add ecx, 511
+	shr ecx, 9
+
+	mov si, msg_reading_kernel
+	call print
+
+	; Load kernel in 0x10000
+	mov ax, 0x1000
+	mov es, ax
+	xor bx, bx
+
+	; Read kernel
+	mov ah, 0x02
+	mov al, cl ; number of sectors
+	mov cx, ax ; eax contains kernel_sector
+
+	; Convert sector to CHS
+	mov cl, byte [0x7E00] ; kernel_sector in CX (only lower bits)
+	inc cl ; BIOS use 1-based
+	mov ch, 0 ; cilindre 0
+	mov dh, 0 ; head 0
+	mov dl, 0x80
+	int 0x13
+
+	mov si, msg_kernel_ok
+	call print
+
+	; jump into kernel
+	jmp 0x1000:0x0000 ; segment:offset
+
+disk_error:
+	mov si, msg_error
+	call print
 	hlt
+	jmp $
 
-.halt:
-	; jumps to given location, unconditionally
-	jmp .halt
-
-msg_hello: db 'Saluton Mondo de KapOS en Esperanto!', 0
+msg_reading_header: db 'Reading header...', ENDL, 0
+msg_header_ok: db 'Header OK', ENDL, 0
+msg_reading_kernel: db 'Reading kernel...', ENDL, 0
+msg_kernel_ok: db 'Kernel loaded, jumping!', ENDL, 0
+msg_error: db 'DISK ERROR', ENDL, 0
 
 ; repeats given instruction or piece of data a number of times
 ; $ is an special symbol which is equal to the memory offset of the current line

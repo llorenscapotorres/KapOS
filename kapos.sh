@@ -13,4 +13,4 @@ fi
 
 make --no-print-directory -s
 
-qemu-system-x86_64 -M pc-i440fx-8.2 -drive file=build/main_disk.img,format=raw,if=ide -boot a
+qemu-system-x86_64 -M pc-i440fx-8.2 -drive file=build/main_disk.img,format=raw,if=ide -boot c
