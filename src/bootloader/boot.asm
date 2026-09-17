@@ -7,26 +7,6 @@ org 0x7C00
 ; Bootloader runs in real mode before switching to protected mode.
 bits 16
 
-%define ENDL 0x0D, 0x0A
-
-start:
-	jmp bootloader
-
-print:
-	push si
-	push ax
-.loop:
-	lodsb
-	or al, al
-	jz .done
-	mov ah, 0x0E
-	int 0x10
-	jmp .loop
-.done:
-	pop ax
-	pop si
-	ret
-
 bootloader:
 
 	; Setup data segment registers for proper memory access.
@@ -56,9 +36,6 @@ bootloader:
 	; When PUSH happens, stack pointer decreases (grows down).
 	mov sp, 0x7C00
 
-	mov si, msg_reading_header
-	call print
-
 	; Read sector 1 (image_header) at 0x7E00
 	mov ax, 0
 	mov es, ax
@@ -74,9 +51,6 @@ bootloader:
 
 	jc disk_error ; jump if there is an error
 
-	mov si, msg_header_ok
-	call print
-
 	; Read header values
 	mov eax, [0x7E00] ; kernel_sector
 	mov ecx, [0x7E04] ; kernel_size
@@ -85,9 +59,6 @@ bootloader:
 	; sectors = (kernel_size + 511) / 512
 	add ecx, 511
 	shr ecx, 9
-
-	mov si, msg_reading_kernel
-	call print
 
 	; Load kernel in 0x10000
 	mov ax, 0x1000
@@ -107,23 +78,94 @@ bootloader:
 	mov dl, 0x80
 	int 0x13
 
-	mov si, msg_kernel_ok
-	call print
+	; ---------------------------------------------------------------
+	; Enable A20 line
+	; ---------------------------------------------------------------
+	; On real 8086 CPUs, memory addresses wrapped around at 1MB
+	; (address bit 20 was ignored). Modern CPUs keep this "feature"
+	; disabled by default for backwards compatibility, so anything
+	; using linear addresses at/above 1MB (like our flat protected
+	; mode GDT) needs it turned on first.
+	; Fast A20 gate: bit 1 of port 0x92 enables the A20 line.
+	in al, 0x92
+	or al, 2
+	out 0x92, al
 
-	; jump into kernel
-	jmp 0x1000:0x0000 ; segment:offset
+	; ---------------------------------------------------------------
+	; Switch to protected mode
+	; ---------------------------------------------------------------
+	cli ; disable interrupts: the real-mode IDT is about to become invalid
+
+	lgdt [gdt_descriptor] ; load GDT: cs still real-mode until the far jump below
+
+	mov eax, cr0
+	or eax, 1 ; set PE (Protection Enable) bit
+	mov cr0, eax
+
+	; Far jump into 32-bit code. This is required (not just a style
+	; choice): it flushes the CPU's instruction prefetch queue and
+	; loads CS with the new descriptor, actually entering 32-bit mode.
+	jmp CODE_SEG:protected_mode_start
 
 disk_error:
-	mov si, msg_error
-	call print
 	hlt
 	jmp $
 
-msg_reading_header: db 'Reading header...', ENDL, 0
-msg_header_ok: db 'Header OK', ENDL, 0
-msg_reading_kernel: db 'Reading kernel...', ENDL, 0
-msg_kernel_ok: db 'Kernel loaded, jumping!', ENDL, 0
-msg_error: db 'DISK ERROR', ENDL, 0
+; ---------------------------------------------------------------
+; Global Descriptor Table
+; ---------------------------------------------------------------
+gdt_start:
+
+gdt_null:               ; mandatory null descriptor, selector 0x00
+	dq 0x0
+
+gdt_code:                ; selector = gdt_code - gdt_start
+	dw 0xFFFF             ; limit 0-15   -> 0xFFFFF with 4KB granularity = 4GB
+	dw 0x0                ; base 0-15    -> 0
+	db 0x0                ; base 16-23   -> 0
+	db 10011010b          ; access: present, ring0, code/data, executable, readable
+	db 11001111b          ; flags (4KB granularity, 32-bit) + limit 16-19
+	db 0x0                ; base 24-31   -> 0
+
+gdt_data:                ; selector = gdt_data - gdt_start
+	dw 0xFFFF
+	dw 0x0
+	db 0x0
+	db 10010010b          ; access: present, ring0, code/data, writable
+	db 11001111b
+	db 0x0
+
+gdt_end:
+
+gdt_descriptor:
+	dw gdt_end - gdt_start - 1 ; size of GDT minus 1, as lgdt expects
+	dd gdt_start                ; linear address of the table (org 0x7C00 makes this absolute)
+
+CODE_SEG equ gdt_code - gdt_start
+DATA_SEG equ gdt_data - gdt_start
+
+; ---------------------------------------------------------------
+; 32-bit protected mode entry point
+; ---------------------------------------------------------------
+bits 32
+
+protected_mode_start:
+	; Reload every segment register with the flat data selector.
+	; Real-mode segment:offset addressing no longer applies: these
+	; selectors now index descriptors in the GDT above.
+	mov ax, DATA_SEG
+	mov ds, ax
+	mov es, ax
+	mov ss, ax
+	mov fs, ax
+	mov gs, ax
+
+	mov esp, 0x90000 ; fresh protected-mode stack, well above the bootloader/kernel
+
+	; Jump into the kernel. It was loaded at physical 0x10000
+	; (segment 0x1000, offset 0x0000 in real mode); with a flat
+	; descriptor (base 0) that is simply the linear address 0x10000.
+	jmp CODE_SEG:0x10000
 
 ; repeats given instruction or piece of data a number of times
 ; $ is an special symbol which is equal to the memory offset of the current line
