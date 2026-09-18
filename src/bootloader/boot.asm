@@ -79,6 +79,54 @@ bootloader:
 	int 0x13
 
 	; ---------------------------------------------------------------
+	; Query BIOS memory map (INT 0x15, EAX=0xE820)
+	; ---------------------------------------------------------------
+	; Must run here: this BIOS service only exists in real mode, so it
+	; has to happen before the switch to protected mode below. The
+	; kernel will need this map later to know which memory it can use,
+	; so we stash it at a fixed, otherwise-unused address (0x8000) for
+	; it to read once it's running.
+	;
+	; Layout at 0x8000:
+	;   dword [0x8000]        number of entries
+	;   struct[N] @ 0x8004    24-byte ACPI 3.0 memory map entries:
+	;                         qword base, qword length, dword type,
+	;                         dword extended attributes
+
+	mov ax, 0
+	mov es, ax ; es must be 0 so es:di below addresses 0x8000 directly
+
+	mov di, 0x8004 ; leave room at 0x8000 for the entry count
+	xor ebx, ebx ; continuation offset, must be 0 on the first call
+	xor bp, bp ; bp = number of entries found so far
+
+.e820_loop:
+	mov eax, 0xE820
+	mov edx, 0x534D4150 ; 'SMAP' signature BIOS expects/returns
+	mov ecx, 24 ; ask for the ACPI 3.0 entry (base+length+type+ext attrs)
+	int 0x15
+
+	jc .e820_done ; carry set: unsupported or end of list
+
+	cmp eax, 0x534D4150 ; BIOS should echo 'SMAP' back in eax
+	jne .e820_done
+
+	cmp ecx, 20 ; discard malformed entries shorter than base+length+type
+	jl .e820_skip
+
+	inc bp
+	add di, 24
+
+.e820_skip:
+	test ebx, ebx ; BIOS sets ebx = 0 to signal this was the last entry
+	jz .e820_done
+
+	jmp .e820_loop
+
+.e820_done:
+	mov [0x8000], bp ; store final entry count
+
+	; ---------------------------------------------------------------
 	; Enable A20 line
 	; ---------------------------------------------------------------
 	; On real 8086 CPUs, memory addresses wrapped around at 1MB
